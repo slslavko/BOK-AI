@@ -1,6 +1,12 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { cn } from "@/lib/utils";
+import SidebarNav from "@/components/SidebarNav";
+import { Bot } from "lucide-react";
+import Toaster from "@/components/Toaster";
+import NotificationPanel from "@/components/NotificationPanel";
+import DarkLightModeSwitch from "@/components/DarkLightModeSwitch";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -23,11 +29,35 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="pl" suppressHydrationWarning>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className={cn(
+          `${geistSans.variable} ${geistMono.variable} antialiased min-h-screen relative overflow-x-hidden bg-background text-foreground`,
+        )}
+        suppressHydrationWarning
       >
+        <Toaster>
+          <NotificationPanel />
+          <div className="flex min-h-screen">
+            <SidebarNav />
+            <main className="flex-1 flex flex-col">
+              {/* Topbar */}
+              <header className="h-16 border-b border-white/10 bg-white/5 backdrop-blur-xl flex items-center px-4 shadow-sm sticky top-0 z-30 justify-between">
+                <div className="font-bold text-lg tracking-tight bg-gradient-to-r from-violet-400 to-blue-400 text-transparent bg-clip-text md:hidden">BOK AI</div>
+                <div className="flex items-center gap-4">
+                  {/* Placeholder na status bota */}
+                  <div className="flex items-center gap-2 px-3 py-1 rounded-full text-sm font-medium border border-green-400 bg-green-100 dark:bg-green-500/20 text-green-800 dark:text-green-300">
+                    <Bot className="w-4 h-4 text-green-700 dark:text-green-300" /> Online
+                  </div>
+                  <DarkLightModeSwitch />
+                </div>
+              </header>
+              <section className="flex-1 p-4 md:p-8 xl:p-12">
         {children}
+              </section>
+            </main>
+          </div>
+        </Toaster>
       </body>
     </html>
   );

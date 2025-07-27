@@ -1,0 +1,180 @@
+import { FastifyInstance } from 'fastify';
+
+export interface LearningMetrics {
+  totalConversations: number;
+  averageResponseTime: number;
+  customerSatisfaction: number;
+  topIntents: Array<{ intent: string; count: number }>;
+  commonIssues: string[];
+  improvementSuggestions: string[];
+}
+
+export interface FeedbackEntry {
+  id: string;
+  conversationId: string;
+  tenantId: string;
+  feedbackType: 'explicit' | 'implicit';
+  rating?: 'good' | 'bad' | 'neutral';
+  correction?: string;
+  humanTakeover: boolean;
+  timestamp: Date;
+  context: Record<string, any>;
+}
+
+export class LearningSystem {
+  private fastify: FastifyInstance;
+  private logger: any;
+
+  constructor(fastify: FastifyInstance) {
+    this.fastify = fastify;
+    this.logger = fastify.log;
+  }
+
+  async logConversation(
+    tenantId: string,
+    conversationId: string,
+    userMessage: string,
+    aiResponse: string,
+    metadata: {
+      confidence: number;
+      sources: string[];
+      platform: string;
+      customerId: string;
+      intent: string;
+      responseTime: number;
+      cost: number;
+    }
+  ): Promise<string> {
+    try {
+      // Store conversation in database
+      await this.fastify.pg.query(`
+        INSERT INTO conversations (id, tenant_id, platform, customer_id, status, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+        ON CONFLICT (id) DO UPDATE SET updated_at = NOW()
+      `, [conversationId, tenantId, metadata.platform, metadata.customerId, 'active']);
+
+      // Store messages
+      await this.fastify.pg.query(`
+        INSERT INTO messages (conversation_id, content, author, created_at)
+        VALUES ($1, $2, $3, NOW()), ($1, $4, $5, NOW())
+      `, [conversationId, userMessage, 'user', aiResponse, 'assistant']);
+
+      // Store AI usage log
+      await this.fastify.pg.query(`
+        INSERT INTO ai_usage_logs (tenant_id, conversation_id, tokens_used, cost, model, confidence, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      `, [tenantId, conversationId, Math.ceil(userMessage.length / 4), metadata.cost, 'gpt-3.5-turbo', metadata.confidence]);
+
+      this.logger.info({ tenantId, conversationId }, 'Conversation logged successfully');
+      return conversationId;
+
+    } catch (error) {
+      this.logger.error({ error, tenantId, conversationId }, 'Failed to log conversation');
+      throw error;
+    }
+  }
+
+  async recordFeedback(
+    conversationId: string,
+    tenantId: string,
+    feedback: {
+      type: 'explicit' | 'implicit';
+      rating?: 'good' | 'bad' | 'neutral';
+      correction?: string;
+      humanTakeover?: boolean;
+    }
+  ): Promise<void> {
+    try {
+      const feedbackEntry: FeedbackEntry = {
+        id: `feedback_${Date.now()}`,
+        conversationId,
+        tenantId,
+        feedbackType: feedback.type,
+        rating: feedback.rating || 'neutral',
+        correction: feedback.correction,
+        humanTakeover: feedback.humanTakeover || false,
+        timestamp: new Date(),
+        context: {}
+      };
+
+      // Store feedback
+      await this.fastify.pg.query(`
+        INSERT INTO feedback (id, conversation_id, tenant_id, feedback_type, rating, correction, human_takeover, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+      `, [
+        feedbackEntry.id,
+        conversationId,
+        tenantId,
+        feedback.type,
+        feedback.rating,
+        feedback.correction,
+        feedback.humanTakeover
+      ]);
+
+      this.logger.info({ tenantId, conversationId }, 'Feedback recorded successfully');
+
+    } catch (error) {
+      this.logger.error({ error, tenantId, conversationId }, 'Failed to record feedback');
+      throw error;
+    }
+  }
+
+  async getLearningInsights(tenantId: string): Promise<LearningMetrics> {
+    try {
+      // Get basic metrics
+      const [conversationsResult, feedbackResult] = await Promise.all([
+        this.fastify.pg.query(`
+          SELECT 
+            COUNT(*) as total_conversations,
+            AVG(EXTRACT(EPOCH FROM (updated_at - created_at))) as avg_response_time
+          FROM conversations 
+          WHERE tenant_id = $1
+        `, [tenantId]),
+        
+        this.fastify.pg.query(`
+          SELECT rating, COUNT(*) as count
+          FROM feedback 
+          WHERE tenant_id = $1 AND feedback_type = 'explicit'
+          GROUP BY rating
+        `, [tenantId])
+      ]);
+
+      const totalConversations = parseInt(conversationsResult.rows[0]?.total_conversations || '0');
+      const averageResponseTime = parseFloat(conversationsResult.rows[0]?.avg_response_time || '0');
+      
+      // Calculate satisfaction score
+      const feedbackCounts = feedbackResult.rows.reduce((acc: any, row: any) => {
+        acc[row.rating] = parseInt(row.count);
+        return acc;
+      }, {});
+      
+      const totalFeedback = Object.values(feedbackCounts).reduce((sum: number, count: any) => sum + count, 0);
+      const satisfaction = totalFeedback > 0 
+        ? ((feedbackCounts.good || 0) / totalFeedback) * 100 
+        : 0;
+
+      return {
+        totalConversations,
+        averageResponseTime,
+        customerSatisfaction: satisfaction,
+        topIntents: [],
+        commonIssues: [],
+        improvementSuggestions: []
+      };
+
+    } catch (error) {
+      this.logger.error({ error, tenantId }, 'Failed to get learning insights');
+      throw error;
+    }
+  }
+
+  async healthCheck(): Promise<boolean> {
+    try {
+      await this.fastify.pg.query('SELECT 1');
+      return true;
+    } catch (error) {
+      this.logger.error('Learning system health check failed:', error);
+      return false;
+    }
+  }
+} 

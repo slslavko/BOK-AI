@@ -1,0 +1,131 @@
+import { ChromaStore } from '../chromaStore';
+import OpenAI from 'openai';
+
+export interface RAGConfig {
+  openaiKey: string;
+  chromaUrl: string;
+  logger: any;
+}
+
+export interface RAGResponse {
+  response: string;
+  confidence: number;
+  sources: string[];
+  cost: number;
+  model: string;
+}
+
+export class ProductionRAG {
+  private chromaStore: ChromaStore;
+  private openai: OpenAI;
+  private logger: any;
+
+  constructor(config: RAGConfig) {
+    this.chromaStore = new ChromaStore();
+    this.openai = new OpenAI({ apiKey: config.openaiKey });
+    this.logger = config.logger;
+  }
+
+  async processQuery(
+    tenantId: string,
+    query: string,
+    options: {
+      maxResults?: number;
+      threshold?: number;
+      maxTokens?: number;
+    } = {}
+  ): Promise<RAGResponse> {
+    const startTime = Date.now();
+    
+    try {
+      // Search knowledge base
+      const searchResults = await this.chromaStore.search(tenantId, query, {
+        maxResults: options.maxResults || 5,
+        threshold: options.threshold || 0.7
+      });
+
+      // Build context from search results
+      const context = searchResults.map(result => result.text).join('\n\n');
+      
+      // Generate response with OpenAI
+      const completion = await this.openai.chat.completions.create({
+        model: 'gpt-3.5-turbo',
+        messages: [
+          {
+            role: 'system',
+            content: `You are a helpful AI assistant. Use the following context to answer the user's question. If you don't know the answer, say so. Context: ${context}`
+          },
+          {
+            role: 'user',
+            content: query
+          }
+        ],
+        max_tokens: options.maxTokens || 500,
+        temperature: 0.3
+      });
+
+      const response = completion.choices[0]?.message?.content || 'I cannot answer this question.';
+      const tokens = completion.usage?.total_tokens || 0;
+      const cost = this.calculateCost(tokens);
+
+      return {
+        response,
+        confidence: this.calculateConfidence(searchResults),
+        sources: searchResults.map(r => r.metadata?.source || 'unknown'),
+        cost,
+        model: 'gpt-3.5-turbo'
+      };
+
+    } catch (error) {
+      this.logger.error('RAG processing error:', error);
+      
+      return {
+        response: 'I apologize, but I encountered an error processing your request.',
+        confidence: 0,
+        sources: [],
+        cost: 0,
+        model: 'error'
+      };
+    }
+  }
+
+  async addKnowledge(
+    tenantId: string,
+    docId: string,
+    content: string,
+    metadata: Record<string, any> = {}
+  ): Promise<void> {
+    await this.chromaStore.addDocuments(tenantId, [{
+      id: docId,
+      text: content,
+      metadata: {
+        source: metadata.source || 'manual',
+        title: metadata.title || 'Document',
+        created_at: new Date().toISOString(),
+        ...metadata
+      }
+    }]);
+  }
+
+  private calculateConfidence(searchResults: any[]): number {
+    if (searchResults.length === 0) return 0;
+    
+    const avgScore = searchResults.reduce((sum, result) => sum + (result.score || 0), 0) / searchResults.length;
+    return Math.min(avgScore, 1);
+  }
+
+  private calculateCost(tokens: number): number {
+    // OpenAI GPT-3.5-turbo pricing: $0.002 per 1K tokens
+    return (tokens / 1000) * 0.002;
+  }
+
+  async healthCheck(): Promise<boolean> {
+    try {
+      await this.chromaStore.healthCheck();
+      return true;
+    } catch (error) {
+      this.logger.error('RAG health check failed:', error);
+      return false;
+    }
+  }
+} 
